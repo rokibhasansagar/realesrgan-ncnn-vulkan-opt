@@ -107,14 +107,14 @@ static void print_usage()
     fprintf(stderr, "  -h                   show this help\n");
     fprintf(stderr, "  -i input-path        input image path (jpg/png/webp) or directory\n");
     fprintf(stderr, "  -o output-path       output image path (jpg/png/webp) or directory\n");
-    fprintf(stderr, "  -s scale             upscale ratio (can be 2, 3, 4. default=4)\n");
+    fprintf(stderr, "  -s scale             upscale ratio (can be 2/3/4. default=4)\n");
     fprintf(stderr, "  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu\n");
     fprintf(stderr, "  -m model-path        folder path to the pre-trained models. default=models\n");
     fprintf(stderr, "  -n model-name        model name (default=realesr-animevideov3, can be realesr-animevideov3 | realesrgan-x4plus | realesrgan-x4plus-anime | realesrnet-x4plus)\n");
     fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
     fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
-    fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
+    fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -v                   verbose output\n");
 }
 
@@ -273,6 +273,7 @@ void* load(void* args)
         {
             Task v;
             v.id = i;
+            v.webp = webp;
             v.inpath = imagepath;
             v.outpath = ltp->output_files[i];
 
@@ -549,6 +550,13 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    if (!(scale == 2 || scale == 3 || scale == 4))
+    {
+        fprintf(stderr, "invalid scale argument\n");
+        return -1;
+    }
+
+
     if (tilesize.size() != (gpuid.empty() ? 1 : gpuid.size()) && !tilesize.empty())
     {
         fprintf(stderr, "invalid tilesize argument\n");
@@ -673,8 +681,7 @@ int main(int argc, char** argv)
 
     int prepadding = 0;
 
-    if (model.find(PATHSTR("models")) != path_t::npos
-        || model.find(PATHSTR("models2")) != path_t::npos)
+    if (model.find(PATHSTR("models")) != path_t::npos)
     {
         prepadding = 10;
     }
@@ -756,7 +763,7 @@ int main(int argc, char** argv)
     int gpu_count = ncnn::get_gpu_count();
     for (int i=0; i<use_gpu_count; i++)
     {
-        if (gpuid[i] < 0 || gpuid[i] >= gpu_count)
+        if (gpuid[i] < -1 || gpuid[i] >= gpu_count)
         {
             fprintf(stderr, "invalid gpu device\n");
 
@@ -766,11 +773,19 @@ int main(int argc, char** argv)
     }
 
     int total_jobs_proc = 0;
+    int jobs_proc_per_gpu[16] = {0};
     for (int i=0; i<use_gpu_count; i++)
     {
-        int gpu_queue_count = ncnn::get_gpu_info(gpuid[i]).compute_queue_count();
-        jobs_proc[i] = std::min(jobs_proc[i], gpu_queue_count);
-        total_jobs_proc += jobs_proc[i];
+        if (gpuid[i] == -1)
+        {
+            jobs_proc[i] = std::min(jobs_proc[i], cpu_count);
+            total_jobs_proc += 1;
+        }
+        else
+        {
+            total_jobs_proc += jobs_proc[i];
+            jobs_proc_per_gpu[gpuid[i]] += jobs_proc[i];
+        }
     }
 
     for (int i=0; i<use_gpu_count; i++)
@@ -778,7 +793,20 @@ int main(int argc, char** argv)
         if (tilesize[i] != 0)
             continue;
 
+        if (gpuid[i] == -1)
+        {
+            // cpu only
+            tilesize[i] = 400;
+            continue;
+        }
+
         uint32_t heap_budget = ncnn::get_gpu_device(gpuid[i])->get_heap_budget();
+
+        if (path_is_directory(inputpath) && path_is_directory(outputpath))
+        {
+            // multiple gpu jobs share the same heap
+            heap_budget /= jobs_proc_per_gpu[gpuid[i]];
+        }
 
         // more fine-grained tilesize policy here
         if (model.find(PATHSTR("models")) != path_t::npos)
@@ -799,7 +827,9 @@ int main(int argc, char** argv)
 
         for (int i=0; i<use_gpu_count; i++)
         {
-            realesrgan[i] = new RealESRGAN(gpuid[i], tta_mode);
+            int num_threads = gpuid[i] == -1 ? jobs_proc[i] : 1;
+
+            realesrgan[i] = new RealESRGAN(gpuid[i], tta_mode, num_threads);
 
             realesrgan[i]->load(paramfullpath, modelfullpath);
 
@@ -831,9 +861,16 @@ int main(int argc, char** argv)
                 int total_jobs_proc_id = 0;
                 for (int i=0; i<use_gpu_count; i++)
                 {
-                    for (int j=0; j<jobs_proc[i]; j++)
+                    if (gpuid[i] == -1)
                     {
                         proc_threads[total_jobs_proc_id++] = new ncnn::Thread(proc, (void*)&ptp[i]);
+                    }
+                    else
+                    {
+                        for (int j=0; j<jobs_proc[i]; j++)
+                        {
+                            proc_threads[total_jobs_proc_id++] = new ncnn::Thread(proc, (void*)&ptp[i]);
+                        }
                     }
                 }
             }

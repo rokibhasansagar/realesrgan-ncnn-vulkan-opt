@@ -1,6 +1,12 @@
-cmake_policy(SET CMP0091 NEW)
-set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+cmake_minimum_required(VERSION 3.9)
+
+if(NOT CMAKE_VERSION VERSION_LESS "3.15")
+    # enable CMAKE_MSVC_RUNTIME_LIBRARY
+    cmake_policy(SET CMP0091 NEW)
+    if(MSVC)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
 
 # -------------- Support C++17 for using filesystem  ------------------#
 # https://cmake.org/cmake/help/latest/prop_tgt/CXX_STANDARD.html
@@ -16,9 +22,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(realesrgan-ncnn-vulkan)
 
-cmake_minimum_required(VERSION 3.9)
-
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE)
+    # set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build" FORCE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
 option(USE_SYSTEM_NCNN "build with system libncnn" OFF)
 option(USE_SYSTEM_WEBP "build with system libwebp" OFF)
@@ -28,12 +35,12 @@ find_package(Threads)
 find_package(OpenMP)
 find_package(Vulkan REQUIRED)
 
+# check glslangValidator
 find_program(GLSLANGVALIDATOR_EXECUTABLE NAMES glslangValidator PATHS $ENV{VULKAN_SDK}/bin NO_CMAKE_FIND_ROOT_PATH)
 message(STATUS "Found glslangValidator: ${GLSLANGVALIDATOR_EXECUTABLE}")
 
 macro(compile_shader SHADER_SRC)
     set(SHADER_SRC_FULLPATH ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SRC})
-
     get_filename_component(SHADER_SRC_NAME_WE ${SHADER_SRC} NAME_WE)
     set(SHADER_SPV_HEX_FILE ${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SRC_NAME_WE}.spv.hex.h)
     add_custom_command(
@@ -98,27 +105,30 @@ else()
 endif()
 
 if(USE_SYSTEM_NCNN)
-    set(GLSLANG_TARGET_DIR "GLSLANG-NOTFOUND" CACHE PATH "Absolute path to glslangTargets.cmake directory")
-    if(NOT GLSLANG_TARGET_DIR AND NOT DEFINED ENV{GLSLANG_TARGET_DIR})
-        message(WARNING "GLSLANG_TARGET_DIR must be defined! USE_SYSTEM_NCNN will be turned off.")
-        set(USE_SYSTEM_NCNN OFF)
+    find_package(Threads)
+    find_package(glslang QUIET)
+    if(glslang_FOUND)
+        add_library(glslang ALIAS glslang::glslang)
+        add_library(SPIRV ALIAS glslang::SPIRV)
     else()
-        message(STATUS "Using glslang install located at ${GLSLANG_TARGET_DIR}")
-
-        find_package(Threads)
-
-        include("${GLSLANG_TARGET_DIR}/OSDependentTargets.cmake")
-        include("${GLSLANG_TARGET_DIR}/OGLCompilerTargets.cmake")
-        if(EXISTS "${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
-            # hlsl support can be optional
-            include("${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
-        endif()
-        include("${GLSLANG_TARGET_DIR}/glslangTargets.cmake")
-        include("${GLSLANG_TARGET_DIR}/SPIRVTargets.cmake")
-
-        if (NOT TARGET glslang OR NOT TARGET SPIRV)
-            message(WARNING "glslang or SPIRV target not found! USE_SYSTEM_NCNN will be turned off.")
+        set(GLSLANG_TARGET_DIR "GLSLANG-NOTFOUND" CACHE PATH "Absolute path to glslangTargets.cmake directory")
+        if(NOT GLSLANG_TARGET_DIR AND NOT DEFINED ENV{GLSLANG_TARGET_DIR})
+            message(WARNING "GLSLANG_TARGET_DIR must be defined! USE_SYSTEM_NCNN will be turned off.")
             set(USE_SYSTEM_NCNN OFF)
+        else()
+            message(STATUS "Using glslang install located at ${GLSLANG_TARGET_DIR}")
+            include("${GLSLANG_TARGET_DIR}/OSDependentTargets.cmake")
+            include("${GLSLANG_TARGET_DIR}/OGLCompilerTargets.cmake")
+            if(EXISTS "${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
+                # hlsl support can be optional
+                include("${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
+            endif()
+            include("${GLSLANG_TARGET_DIR}/glslangTargets.cmake")
+            include("${GLSLANG_TARGET_DIR}/SPIRVTargets.cmake")
+            if (NOT TARGET glslang OR NOT TARGET SPIRV)
+                message(WARNING "glslang or SPIRV target not found! USE_SYSTEM_NCNN will be turned off.")
+                set(USE_SYSTEM_NCNN OFF)
+            endif()
         endif()
     endif()
 endif()
@@ -139,14 +149,17 @@ if(NOT USE_SYSTEM_NCNN)
 
     option(NCNN_INSTALL_SDK "" OFF)
     option(NCNN_PIXEL_ROTATE "" OFF)
+    option(NCNN_PIXEL_AFFINE "" OFF)
+    option(NCNN_PIXEL_DRAWING "" OFF)
     option(NCNN_VULKAN "" ON)
     option(NCNN_VULKAN_ONLINE_SPIRV "" ON)
     option(NCNN_BUILD_BENCHMARK "" OFF)
     option(NCNN_BUILD_TESTS "" OFF)
-    option(NCNN_BUILD_TOOLS "" OFF)
+    option(NCNN_BUILD_TOOLS "" ON)
     option(NCNN_BUILD_EXAMPLES "" OFF)
     option(NCNN_DISABLE_RTTI "" ON)
     option(NCNN_DISABLE_EXCEPTION "" ON)
+    # option(NCNN_INT8 "" OFF)
 
     option(WITH_LAYER_absval "" OFF)
     option(WITH_LAYER_argmax "" OFF)
@@ -242,7 +255,7 @@ endif()
 if(NOT USE_SYSTEM_WEBP)
     # build libwebp library
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libwebp/CMakeLists.txt")
-        message(FATAL_ERROR "The submodules were not downloaded! Please update submodules with \"git submodule update --init --recursive\" and try again.")
+        message(FATAL_ERROR "The libwebp submodule was not downloaded! Please update submodules with \"git submodule update --init --recursive\" and try again.")
     endif()
 
     option(WEBP_ENABLE_SIMD "" ON)
@@ -307,4 +320,3 @@ if(OPENMP_FOUND)
 endif()
 
 target_link_libraries(realesrgan-ncnn-vulkan ${REALESRGAN_LINK_LIBRARIES} -static-libstdc++)
-

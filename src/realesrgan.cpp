@@ -43,16 +43,11 @@ static const uint32_t realesrgan_postproc_tta_int8s_spv_data[] = {
     #include "realesrgan_postproc_tta_int8s.spv.hex.h"
 };
 
-RealESRGAN::RealESRGAN(int gpuid, bool _tta_mode)
+RealESRGAN::RealESRGAN(int gpuid, bool _tta_mode, int num_threads)
 {
-    net.opt.use_vulkan_compute = true;
-    net.opt.use_fp16_packed = true;
-    net.opt.use_fp16_storage = true;
-    net.opt.use_fp16_arithmetic = false;
-    net.opt.use_int8_storage = true;
-    net.opt.use_int8_arithmetic = false;
+    vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
-    net.set_vulkan_device(gpuid);
+    net.opt.num_threads = num_threads;
 
     realesrgan_preproc = 0;
     realesrgan_postproc = 0;
@@ -86,6 +81,15 @@ int RealESRGAN::load(const std::wstring& parampath, const std::wstring& modelpat
 int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
 #endif
 {
+    net.opt.use_vulkan_compute = vkdev ? true : false;
+    net.opt.use_fp16_packed = true;
+    net.opt.use_fp16_storage = true;
+    net.opt.use_fp16_arithmetic = false;
+    net.opt.use_int8_storage = true;
+    net.opt.use_int8_arithmetic = false;
+
+    net.set_vulkan_device(vkdev);
+
 #if _WIN32
     {
         FILE* fp = _wfopen(parampath.c_str(), L"rb");
@@ -115,6 +119,7 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
 #endif
 
     // initialize preprocess and postprocess pipeline
+    if (vkdev)
     {
         std::vector<ncnn::vk_specialization_type> specializations(1);
 #if _WIN32
@@ -166,7 +171,7 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
     // bicubic 2x/3x/4x for alpha channel
     {
         bicubic_2x = ncnn::create_layer("Interp");
-        bicubic_2x->vkdev = net.vulkan_device();
+        bicubic_2x->vkdev = vkdev;
 
         ncnn::ParamDict pd;
         pd.set(0, 3);// bicubic
@@ -178,7 +183,7 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
     }
     {
         bicubic_3x = ncnn::create_layer("Interp");
-        bicubic_3x->vkdev = net.vulkan_device();
+        bicubic_3x->vkdev = vkdev;
 
         ncnn::ParamDict pd;
         pd.set(0, 3);// bicubic
@@ -190,7 +195,7 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
     }
     {
         bicubic_4x = ncnn::create_layer("Interp");
-        bicubic_4x->vkdev = net.vulkan_device();
+        bicubic_4x->vkdev = vkdev;
 
         ncnn::ParamDict pd;
         pd.set(0, 3);// bicubic
@@ -206,6 +211,12 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
 
 int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
 {
+    if (!vkdev)
+    {
+        // cpu only
+        return process_cpu(inimage, outimage);
+    {
+
     const unsigned char* pixeldata = (const unsigned char*)inimage.data;
     const int w = inimage.w;
     const int h = inimage.h;
@@ -214,8 +225,8 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
     const int TILE_SIZE_X = tilesize;
     const int TILE_SIZE_Y = tilesize;
 
-    ncnn::VkAllocator* blob_vkallocator = net.vulkan_device()->acquire_blob_allocator();
-    ncnn::VkAllocator* staging_vkallocator = net.vulkan_device()->acquire_staging_allocator();
+    ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
+    ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
 
     ncnn::Option opt = net.opt;
     opt.blob_vkallocator = blob_vkallocator;
@@ -261,7 +272,7 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
             }
         }
 
-        ncnn::VkCompute cmd(net.vulkan_device());
+        ncnn::VkCompute cmd(vkdev);
 
         // upload
         ncnn::VkMat in_gpu;
@@ -364,9 +375,7 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
                     ex.set_staging_vkallocator(staging_vkallocator);
 
                     ex.input("data", in_tile_gpu[ti]);
-
                     ex.extract("output", out_tile_gpu[ti], cmd);
-
                     {
                         cmd.submit_and_wait();
                         cmd.reset();
@@ -488,8 +497,11 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
                     ex.set_staging_vkallocator(staging_vkallocator);
 
                     ex.input("data", in_tile_gpu);
-
                     ex.extract("output", out_tile_gpu, cmd);
+                    {
+                        cmd.submit_and_wait();
+                        cmd.reset();
+                    }
                 }
 
                 ncnn::VkMat out_alpha_tile_gpu;
@@ -588,8 +600,8 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
         }
     }
 
-    net.vulkan_device()->reclaim_blob_allocator(blob_vkallocator);
-    net.vulkan_device()->reclaim_staging_allocator(staging_vkallocator);
+    vkdev->reclaim_blob_allocator(blob_vkallocator);
+    vkdev->reclaim_staging_allocator(staging_vkallocator);
 
     return 0;
 }
